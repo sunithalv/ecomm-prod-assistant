@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 # Optional: authors, license
-authors = [{ name = "Sunitha L V" }]
+authors = [{ name = "Sunny Savita" }]
 license = { text = "Proprietary" }
 
 # Optional: CLI command (python -m pip install -e . ke baad yeh create hoga)

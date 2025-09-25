@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 import sys
 from pathlib import Path
 
+from langchain.retrievers.document_compressors import LLMChainFilter
+from langchain.retrievers import ContextualCompressionRetriever
+from evaluation.ragas_eval import evaluate_context_precision, evaluate_response_relevancy
+
 # Add the project root to the Python path for direct script execution
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
@@ -52,11 +56,31 @@ class Retriever:
                 token=self.db_application_token,
                 namespace=self.db_keyspace,
                 )
-        if not self.retriever:
+                 
+        if not self.retriever:  
             top_k = self.config["retriever"]["top_k"] if "retriever" in self.config else 3
-            retriever=self.vstore.as_retriever(search_kwargs={"k": top_k})
+            
+            mmr_retriever=self.vstore.as_retriever(
+                search_type="mmr",
+                search_kwargs={"k": top_k,
+                                "fetch_k": 20,
+                                "lambda_mult": 0.7,
+                                "score_threshold": 0.6
+                               })
+            
+            llm = self.model_loader.load_llm()
+            
+            #LLMChainFilter is compressortool that uses an LLM to decide which parts of retrieved documents are relevant to your query.
+            compressor=LLMChainFilter.from_llm(llm)
+            
+            self.retriever = ContextualCompressionRetriever(
+                base_compressor=compressor, 
+                base_retriever=mmr_retriever
+            )
+            
             print("Retriever loaded successfully.")
-            return retriever
+            
+            return self.retriever
             
     def call_retriever(self,query):
         """_summary_
@@ -66,9 +90,52 @@ class Retriever:
         return output
     
 if __name__=='__main__':
+    user_query = "Can you suggest good budget iPhone under 1,00,00 INR?"
+    #user_query = "what is the price of iphone 15 ?"
+    
     retriever_obj = Retriever()
-    user_query = "Can you suggest good budget laptops?"
-    results = retriever_obj.call_retriever(user_query)
+    
+    retrieved_docs = retriever_obj.call_retriever(user_query)
+    
+    def _format_docs(docs) -> List[str]:
+        if not docs:
+            return ["No relevant documents found."]
+        formatted_chunks = []
+        for d in docs:
+            if not isinstance(d, Document):  # safety check
+                continue
+            meta = d.metadata or {}
+            formatted = (
+                f"Title: {meta.get('product_title', 'N/A')}\n"
+                f"Price: {meta.get('price', 'N/A')}\n"
+                f"Rating: {meta.get('rating', 'N/A')}\n"
+                f"Reviews:\n{d.page_content.strip()}"
+            )
+            formatted_chunks.append(formatted)
+        return formatted_chunks
 
-    for idx, doc in enumerate(results, 1):
-        print(f"Result {idx}: {doc.page_content}\nMetadata: {doc.metadata}\n")
+    
+
+    #retrieved_contexts = [_format_docs(doc) for doc in retrieved_docs]
+    
+    retrieved_contexts = _format_docs(retrieved_docs)
+
+    
+    #this is not an actual output this have been written to test the pipeline
+    response="iphone 16 plus, iphone 16, iphone 15 are best phones under 1,00,000 INR."
+    
+    #response="The price of the Apple iPhone 15 is ₹59,999"
+    
+    context_score = evaluate_context_precision(user_query,response,retrieved_contexts)
+    relevancy_score = evaluate_response_relevancy(user_query,response,retrieved_contexts)
+    
+    print("\n--- Evaluation Metrics ---")
+    print("Context Precision Score:", context_score)
+    print("Response Relevancy Score:", relevancy_score)
+    
+
+    
+    
+    
+    # for idx, doc in enumerate(results, 1):
+    #     print(f"Result {idx}: {doc.page_content}\nMetadata: {doc.metadata}\n")

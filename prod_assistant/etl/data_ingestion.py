@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 from typing import List
 from langchain_core.documents import Document
 from langchain_astradb import AstraDBVectorStore
-from utils.model_loader import ModelLoader
-from utils.config_loader import load_config
+from prod_assistant.utils.model_loader import ModelLoader
+from prod_assistant.utils.config_loader import load_config
 
 class DataIngestion:
     """
@@ -92,7 +92,13 @@ class DataIngestion:
                     "total_reviews": entry["total_reviews"],
                     "price": entry["price"]
             }
+            # page_text = (
+            # f"Product: {entry['product_title']}\n"
+            # f"Price: {entry['price']}\n"
+            # f"Top Reviews: {entry['top_reviews']}"
+            # )
             doc = Document(page_content=entry["top_reviews"], metadata=metadata)
+            #doc = Document(page_content=page_text, metadata=metadata)
             documents.append(doc)
 
         print(f"Transformed {len(documents)} documents.")
