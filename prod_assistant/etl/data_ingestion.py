@@ -92,13 +92,7 @@ class DataIngestion:
                     "total_reviews": entry["total_reviews"],
                     "price": entry["price"]
             }
-            # page_text = (
-            # f"Product: {entry['product_title']}\n"
-            # f"Price: {entry['price']}\n"
-            # f"Top Reviews: {entry['top_reviews']}"
-            # )
             doc = Document(page_content=entry["top_reviews"], metadata=metadata)
-            #doc = Document(page_content=page_text, metadata=metadata)
             documents.append(doc)
 
         print(f"Transformed {len(documents)} documents.")

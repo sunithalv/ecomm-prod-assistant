@@ -1,20 +1,14 @@
 import os
 from langchain_astradb import AstraDBVectorStore
-from typing import List
-from langchain_core.documents import Document
 from utils.config_loader import load_config
 from utils.model_loader import ModelLoader
 from dotenv import load_dotenv
-import sys
-from pathlib import Path
-
 from langchain.retrievers.document_compressors import LLMChainFilter
 from langchain.retrievers import ContextualCompressionRetriever
 from evaluation.ragas_eval import evaluate_context_precision, evaluate_response_relevancy
-
 # Add the project root to the Python path for direct script execution
-project_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(project_root))
+# project_root = Path(__file__).resolve().parents[2]
+# sys.path.insert(0, str(project_root))
 
 class Retriever:
     def __init__(self):
@@ -24,7 +18,7 @@ class Retriever:
         self.config=load_config()
         self._load_env_variables()
         self.vstore = None
-        self.retriever = None
+        self.retriever_instance = None
     
     def _load_env_variables(self):
         """_summary_
@@ -56,8 +50,7 @@ class Retriever:
                 token=self.db_application_token,
                 namespace=self.db_keyspace,
                 )
-                 
-        if not self.retriever:  
+        if not self.retriever_instance:
             top_k = self.config["retriever"]["top_k"] if "retriever" in self.config else 3
             
             mmr_retriever=self.vstore.as_retriever(
@@ -67,20 +60,18 @@ class Retriever:
                                 "lambda_mult": 0.7,
                                 "score_threshold": 0.6
                                })
+            print("Retriever loaded successfully.")
             
             llm = self.model_loader.load_llm()
             
-            #LLMChainFilter is compressortool that uses an LLM to decide which parts of retrieved documents are relevant to your query.
             compressor=LLMChainFilter.from_llm(llm)
             
-            self.retriever = ContextualCompressionRetriever(
+            self.retriever_instance = ContextualCompressionRetriever(
                 base_compressor=compressor, 
                 base_retriever=mmr_retriever
             )
             
-            print("Retriever loaded successfully.")
-            
-            return self.retriever
+        return self.retriever_instance
             
     def call_retriever(self,query):
         """_summary_
@@ -91,19 +82,16 @@ class Retriever:
     
 if __name__=='__main__':
     user_query = "Can you suggest good budget iPhone under 1,00,00 INR?"
-    #user_query = "what is the price of iphone 15 ?"
     
     retriever_obj = Retriever()
     
     retrieved_docs = retriever_obj.call_retriever(user_query)
     
-    def _format_docs(docs) -> List[str]:
+    def _format_docs(docs) -> str:
         if not docs:
-            return ["No relevant documents found."]
+            return "No relevant documents found."
         formatted_chunks = []
         for d in docs:
-            if not isinstance(d, Document):  # safety check
-                continue
             meta = d.metadata or {}
             formatted = (
                 f"Title: {meta.get('product_title', 'N/A')}\n"
@@ -112,19 +100,12 @@ if __name__=='__main__':
                 f"Reviews:\n{d.page_content.strip()}"
             )
             formatted_chunks.append(formatted)
-        return formatted_chunks
-
+        return "\n\n---\n\n".join(formatted_chunks)
     
-
-    #retrieved_contexts = [_format_docs(doc) for doc in retrieved_docs]
-    
-    retrieved_contexts = _format_docs(retrieved_docs)
-
+    retrieved_contexts = [_format_docs(doc) for doc in retrieved_docs]
     
     #this is not an actual output this have been written to test the pipeline
     response="iphone 16 plus, iphone 16, iphone 15 are best phones under 1,00,000 INR."
-    
-    #response="The price of the Apple iPhone 15 is ₹59,999"
     
     context_score = evaluate_context_precision(user_query,response,retrieved_contexts)
     relevancy_score = evaluate_response_relevancy(user_query,response,retrieved_contexts)

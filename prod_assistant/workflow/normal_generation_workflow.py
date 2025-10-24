@@ -27,8 +27,7 @@ def format_docs(docs) -> str:
         )
         formatted_chunks.append(formatted)
 
-    #return "\n\n---\n\n".join(formatted_chunks)
-    return formatted_chunks
+    return "\n\n---\n\n".join(formatted_chunks)
 
 
 def build_chain(query):
@@ -36,9 +35,9 @@ def build_chain(query):
     retriever = retriever_obj.load_retriever()
     retrieved_docs=retriever.invoke(query)
     
-    retrieved_contexts = format_docs(retrieved_docs) 
-    
     #retrieved_contexts = [format_docs(doc) for doc in retrieved_docs]
+    
+    retrieved_contexts = [format_docs(retrieved_docs)]
     
     llm = model_loader.load_llm()
     prompt = ChatPromptTemplate.from_template(
@@ -94,9 +93,8 @@ if __name__=='__main__':
     #     return "\n\n---\n\n".join(formatted_chunks)
     
     # retrieved_contexts = [_format_docs(doc) for doc in retrieved_docs]
-  
+    
     retrieved_contexts,response = invoke_chain(user_query)
-    print("RESPONSE IS :",response)
     
     #this is not an actual output this have been written to test the pipeline
     #response="iphone 16 plus, iphone 16, iphone 15 are best phones under 1,00,000 INR."

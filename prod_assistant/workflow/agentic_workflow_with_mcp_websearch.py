@@ -4,44 +4,57 @@ from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 
 from prompt_library.prompts import PROMPT_REGISTRY, PromptType
 from retriever.retrieval import Retriever
 from utils.model_loader import ModelLoader
-from langgraph.checkpoint.memory import MemorySaver
-import asyncio
 from evaluation.ragas_eval import evaluate_context_precision, evaluate_response_relevancy
-
+from langchain_mcp_adapters.client import MultiServerMCPClient
+import asyncio
 
 class AgenticRAG:
-    """Agentic RAG pipeline using LangGraph."""
+    """Agentic RAG pipeline using LangGraph + MCP (Retriever + WebSearch)."""
 
     class AgentState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], add_messages]
 
+    # ---------- Initialization ----------
     def __init__(self):
         self.retriever_obj = Retriever()
         self.model_loader = ModelLoader()
         self.llm = self.model_loader.load_llm()
         self.checkpointer = MemorySaver()
+
+        # Initialize MCP client
+        self.mcp_client = MultiServerMCPClient(
+            {
+                "hybrid_search": {
+                    "transport": "streamable_http",
+                    "url": "http://localhost:8000/mcp"
+                }
+            }
+        )
+
+        # Build workflow
         self.workflow = self._build_workflow()
         self.app = self.workflow.compile(checkpointer=self.checkpointer)
 
-    # ---------- Helpers ----------
-    def _format_docs(self, docs) -> str:
-        if not docs:
-            return "No relevant documents found."
-        formatted_chunks = []
-        for d in docs:
-            meta = d.metadata or {}
-            formatted = (
-                f"Title: {meta.get('product_title', 'N/A')}\n"
-                f"Price: {meta.get('price', 'N/A')}\n"
-                f"Rating: {meta.get('rating', 'N/A')}\n"
-                f"Reviews:\n{d.page_content.strip()}"
-            )
-            formatted_chunks.append(formatted)
-        return "\n\n---\n\n".join(formatted_chunks)
+        # Load MCP tools asynchronously
+        asyncio.run(self._safe_async_init())
+
+    async def async_init(self):
+        """Load MCP tools asynchronously."""
+        self.mcp_tools = await self.mcp_client.get_tools()
+
+    async def _safe_async_init(self):
+        """Safe async init wrapper (prevents event loop crash)."""
+        try:
+            self.mcp_tools = await self.mcp_client.get_tools()
+            print("MCP tools loaded successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to load MCP tools — {e}")
+            self.mcp_tools = []
 
     # ---------- Nodes ----------
     def _ai_assistant(self, state: AgentState):
@@ -56,17 +69,33 @@ class AgenticRAG:
                 "You are a helpful assistant. Answer the user directly.\n\nQuestion: {question}\nAnswer:"
             )
             chain = prompt | self.llm | StrOutputParser()
-            response = chain.invoke({"question": last_message})
+            response = chain.invoke({"question": last_message}) or "I'm not sure about that."
             return {"messages": [HumanMessage(content=response)]}
 
-    def _vector_retriever(self, state: AgentState):
-        
-        print("--- RETRIEVER ---")
+    async def _vector_retriever(self, state: AgentState):
+        print("--- RETRIEVER (MCP) ---")
         query = state["messages"][-1].content
-        retriever = self.retriever_obj.load_retriever()
-        docs = retriever.invoke(query)
-        context = self._format_docs(docs)
+
+        tool = next((t for t in self.mcp_tools if t.name == "get_product_info"), None)
+        if not tool:
+            return {"messages": [HumanMessage(content="Retriever tool not found in MCP client.")]}
+
+        try:
+            result = await tool.ainvoke({"query": query})
+            context = result or "No relevant product data found."
+        except Exception as e:
+            context = f"Error invoking retriever: {e}"
+
         return {"messages": [HumanMessage(content=context)]}
+
+    async def _web_search(self, state: AgentState):
+        print("--- WEB SEARCH (MCP) ---")
+        query = state["messages"][-1].content
+        tool = next(t for t in self.mcp_tools if t.name == "web_search")
+        result = await tool.ainvoke({"query": query})  # ✅
+        context = result if result else "No data from web"
+        return {"messages": [HumanMessage(content=context)]}
+
 
     def _grade_documents(self, state: AgentState) -> Literal["generator", "rewriter"]:
         print("--- GRADER ---")
@@ -79,27 +108,42 @@ class AgenticRAG:
             input_variables=["question", "docs"],
         )
         chain = prompt | self.llm | StrOutputParser()
-        score = chain.invoke({"question": question, "docs": docs})
+        score = chain.invoke({"question": question, "docs": docs}) or ""
         return "generator" if "yes" in score.lower() else "rewriter"
 
     def _generate(self, state: AgentState):
         print("--- GENERATE ---")
         question = state["messages"][0].content
         docs = state["messages"][-1].content
+
         prompt = ChatPromptTemplate.from_template(
             PROMPT_REGISTRY[PromptType.PRODUCT_BOT].template
         )
         chain = prompt | self.llm | StrOutputParser()
-        response = chain.invoke({"context": docs, "question": question})
+
+        try:
+            response = chain.invoke({"context": docs, "question": question}) or "No response generated."
+        except Exception as e:
+            response = f"Error generating response: {e}"
+
         return {"messages": [HumanMessage(content=response)]}
 
     def _rewrite(self, state: AgentState):
         print("--- REWRITE ---")
         question = state["messages"][0].content
-        new_q = self.llm.invoke(
-            [HumanMessage(content=f"Rewrite the query to be clearer: {question}")]
+
+        prompt = ChatPromptTemplate.from_template(
+            "Rewrite this user query to make it more clear and specific for a search engine. "
+            "Do NOT answer the query. Only rewrite it.\n\nQuery: {question}\nRewritten Query:"
         )
-        return {"messages": [HumanMessage(content=new_q.content)]}
+        chain = prompt | self.llm | StrOutputParser()
+
+        try:
+            new_q = chain.invoke({"question": question}).strip()
+        except Exception as e:
+            new_q = f"Error rewriting query: {e}"
+
+        return {"messages": [HumanMessage(content=new_q)]}
 
     # ---------- Build Workflow ----------
     def _build_workflow(self):
@@ -108,7 +152,9 @@ class AgenticRAG:
         workflow.add_node("Retriever", self._vector_retriever)
         workflow.add_node("Generator", self._generate)
         workflow.add_node("Rewriter", self._rewrite)
+        workflow.add_node("WebSearch", self._web_search)
 
+        # Workflow edges
         workflow.add_edge(START, "Assistant")
         workflow.add_conditional_edges(
             "Assistant",
@@ -121,41 +167,22 @@ class AgenticRAG:
             {"generator": "Generator", "rewriter": "Rewriter"},
         )
         workflow.add_edge("Generator", END)
-        workflow.add_edge("Rewriter", "Assistant")
+        workflow.add_edge("Rewriter", "WebSearch")
+        workflow.add_edge("WebSearch", "Generator")
+
         return workflow
 
     # ---------- Public Run ----------
-    def run(self, query: str,thread_id: str = "default_thread") -> str:
+    async def run(self, query: str, thread_id: str = "default_thread") -> str:
         """Run the workflow for a given query and return the final answer."""
-        result = self.app.invoke({"messages": [HumanMessage(content=query)]},
-                                 config={"configurable": {"thread_id": thread_id}})
+        result = await self.app.ainvoke(
+            {"messages": [HumanMessage(content=query)]},
+            config={"configurable": {"thread_id": thread_id}}
+        )
         return result["messages"][-1].content
-    
-        # function call with be asscoiate
-        # you will get some score
-        # put condition behalf on that score
-        # if relevany>0.75
-            #return
-        #else:
-            #contine
 
-
+# ---------- Standalone Test ----------
 if __name__ == "__main__":
-    
-    
     rag_agent = AgenticRAG()
-    answer = rag_agent.run("What is the price of iPhone 15?")
+    answer = rag_agent.run("What is the price of iPhone 16?")
     print("\nFinal Answer:\n", answer)
-    
-    
-    # retrieved_contexts,response = invoke_chain(user_query)
-    
-    # #this is not an actual output this have been written to test the pipeline
-    # #response="iphone 16 plus, iphone 16, iphone 15 are best phones under 1,00,000 INR."
-    
-    # context_score = evaluate_context_precision(user_query,response,retrieved_contexts)
-    # relevancy_score = evaluate_response_relevancy(user_query,response,retrieved_contexts)
-    
-    # print("\n--- Evaluation Metrics ---")
-    # print("Context Precision Score:", context_score)
-    # print("Response Relevancy Score:", relevancy_score)
