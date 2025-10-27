@@ -15,7 +15,6 @@ Parameters:
     Type: String
     Default: product-assistant
 
-
 Resources:
   ### --- VPC ---
   VPC:
